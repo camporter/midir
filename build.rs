@@ -1,10 +1,11 @@
 fn main() {
     #[cfg(windows)]
     windows::build!(
-        //windows::foundation::*,
+        Windows::Foundation::{TypedEventHandler, EventRegistrationToken, IClosable, IAsyncOperation, TimeSpan, MemoryBuffer, IMemoryBufferReference},
         Windows::Devices::Midi::*,
-        Windows::Devices::Enumeration::DeviceInformation,
+        Windows::Devices::Enumeration::{DeviceInformation, DeviceInformationCollection},
         Windows::Storage::Streams::{Buffer, DataWriter},
+        Windows::Win32::WinRT::IMemoryBufferByteAccess,
         Windows::Win32::Multimedia::{midiInAddBuffer, midiInClose, midiInGetDevCapsW, midiInGetNumDevs,
             midiInOpen, midiInPrepareHeader, midiInReset, midiInStart,
             midiInStop, midiInUnprepareHeader, midiOutClose,
