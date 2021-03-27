@@ -9,33 +9,23 @@ use memalloc::{allocate, deallocate};
 use std::mem::MaybeUninit;
 use std::ptr::null_mut;
 
-use ::bindings::windows::win32::multimedia::{
+use ::bindings::Windows::Win32::Multimedia::{
     midiInAddBuffer, midiInClose, midiInGetDevCapsW, midiInGetNumDevs,
     midiInOpen, midiInPrepareHeader, midiInReset, midiInStart,
     midiInStop, midiInUnprepareHeader, midiOutClose,
     midiOutGetDevCapsW, midiOutGetNumDevs, midiOutLongMsg, midiOutOpen,
     midiOutPrepareHeader, midiOutReset, midiOutShortMsg,
     midiOutUnprepareHeader, midiInMessage, midiOutMessage,
-    HMIDIIN, HMIDIOUT, MIDIHDR, MIDIINCAPSW, MIDIOUTCAPSW,
-    CALLBACK_FUNCTION, CALLBACK_NULL, MMSYSERR_NOERROR
+    HMIDIIN, HMIDIOUT, MIDIHDR, MIDIINCAPSW, MIDIOUTCAPSW, MIDI_OPEN_TYPE,
+    MMSYSERR_NOERROR, MMSYSERR_ALLOCATED, MMSYSERR_BADDEVICEID,
+    MIDIERR_NOTREADY, MIDIERR_STILLPLAYING,
+    DRV_QUERYDEVICEINTERFACE, DRV_QUERYDEVICEINTERFACESIZE
 };
 
 #[allow(non_camel_case_types)] type ULONG = u32;
 #[allow(non_camel_case_types)] type UINT = u32;
 #[allow(non_camel_case_types)] type DWORD = u32;
 #[allow(non_camel_case_types)] type DWORD_PTR = usize;
-#[allow(non_camel_case_types)] type UINT_PTR = usize;
-#[allow(non_camel_case_types)] type LPMIDIHDR = *mut MIDIHDR;
-
-#[allow(non_camel_case_types)] type MMRESULT = UINT;
-const MIDIERR_BASE: MMRESULT = 64;
-const MIDIERR_STILLPLAYING: MMRESULT = MIDIERR_BASE + 1; // 65u32
-const MIDIERR_NOTREADY: MMRESULT = MIDIERR_BASE + 3; // 67u32
-const MMSYSERR_BASE: MMRESULT = 0;
-const MMSYSERR_BADDEVICEID: MMRESULT = MMSYSERR_BASE + 2; // 2u32
-const MMSYSERR_ALLOCATED: MMRESULT = MMSYSERR_BASE + 4; // 4u32
-const DRV_QUERYDEVICEINTERFACE: UINT = 0x80c;
-const DRV_QUERYDEVICEINTERFACESIZE: UINT = 0x80d;
 
 use {Ignore, MidiMessage};
 use errors::*;
@@ -72,7 +62,7 @@ pub struct MidiInputConnection<T> {
 }
 
 impl MidiInputPort {
-    pub fn count() -> UINT {
+    fn count() -> UINT {
         unsafe { midiInGetNumDevs() }
     }
 
@@ -107,7 +97,7 @@ impl MidiInputPort {
             return Err(PortInfoError::CannotRetrievePortName)
         }
         let device_caps = unsafe { device_caps.assume_init() };
-        let pname: &[u16] = &device_caps.sz_pname; // FIXME: requires unsafe because of packed alignment ...
+        let pname: &[u16] = unsafe { &device_caps.szPname }; // requires unsafe because of packed alignment ...
         let output = from_wide_ptr(pname.as_ptr(), pname.len()).to_string_lossy().into_owned();
         Ok(output)
     }
@@ -134,7 +124,7 @@ impl MidiInputPort {
     }
 }
 
-struct SysexBuffer([LPMIDIHDR; MIDIR_SYSEX_BUFFER_COUNT]);
+struct SysexBuffer([*mut MIDIHDR; MIDIR_SYSEX_BUFFER_COUNT]);
 unsafe impl Send for SysexBuffer {}
 
 struct MidiInHandle(Mutex<HMIDIIN>);
@@ -211,7 +201,7 @@ impl MidiInput {
                         port_number as UINT,
                         handler::handle_input::<T> as DWORD_PTR,
                         handler_data_ptr as DWORD_PTR,
-                        CALLBACK_FUNCTION as u32) };
+                        MIDI_OPEN_TYPE::CALLBACK_FUNCTION) };
         if result == MMSYSERR_ALLOCATED { 
             return Err(ConnectError::other("could not create Windows MM MIDI input port (MMSYSERR_ALLOCATED)", self));
         } else if result != MMSYSERR_NOERROR {
@@ -222,15 +212,15 @@ impl MidiInput {
         // Allocate and init the sysex buffers.
         for i in 0..MIDIR_SYSEX_BUFFER_COUNT {
             handler_data.sysex_buffer.0[i] = Box::into_raw(Box::new(MIDIHDR {
-                lp_data: unsafe { mem::transmute(allocate(MIDIR_SYSEX_BUFFER_SIZE/*, mem::align_of::<u8>()*/)) },
-                dw_buffer_length: MIDIR_SYSEX_BUFFER_SIZE as u32,
-                dw_bytes_recorded: 0,
-                dw_user: i as DWORD_PTR, // We use the dwUser parameter as buffer indicator
-                dw_flags: 0,
-                lp_next: ptr::null_mut(),
+                lpData: unsafe { mem::transmute(allocate(MIDIR_SYSEX_BUFFER_SIZE/*, mem::align_of::<u8>()*/)) },
+                dwBufferLength: MIDIR_SYSEX_BUFFER_SIZE as u32,
+                dwBytesRecorded: 0,
+                dwUser: i as DWORD_PTR, // We use the dwUser parameter as buffer indicator
+                dwFlags: 0,
+                lpNext: ptr::null_mut(),
                 reserved: 0,
-                dw_offset: 0,
-                dw_reserved: unsafe { mem::zeroed() },
+                dwOffset: 0,
+                dwReserved: unsafe { mem::zeroed() },
             }));
             
             // TODO: are those buffers ever freed if an error occurs here (altough these calls probably only fail with out-of-memory)?
@@ -289,7 +279,7 @@ impl<T> MidiInputConnection<T> {
             let result;
             unsafe {
                 result = midiInUnprepareHeader(*in_handle_lock, self.handler_data.sysex_buffer.0[i], mem::size_of::<MIDIHDR>() as u32);
-                deallocate(mem::transmute((*self.handler_data.sysex_buffer.0[i]).lp_data), MIDIR_SYSEX_BUFFER_SIZE/*, mem::align_of::<u8>()*/);
+                deallocate(mem::transmute((*self.handler_data.sysex_buffer.0[i]).lpData), MIDIR_SYSEX_BUFFER_SIZE/*, mem::align_of::<u8>()*/);
                 // recreate the Box so that it will be dropped/deallocated at the end of this scope
                 let _ = Box::from_raw(self.handler_data.sysex_buffer.0[i]);
             }
@@ -328,7 +318,7 @@ pub struct MidiOutputConnection {
 unsafe impl Send for MidiOutputConnection {}
 
 impl MidiOutputPort {
-    pub fn count() -> UINT {
+    fn count() -> UINT {
         unsafe { midiOutGetNumDevs() }
     }
 
@@ -356,14 +346,14 @@ impl MidiOutputPort {
     
     fn name(port_number: UINT) -> Result<String, PortInfoError> {
         let mut device_caps: MaybeUninit<MIDIOUTCAPSW> = MaybeUninit::uninit();
-        let result = unsafe { midiOutGetDevCapsW(port_number as UINT_PTR, device_caps.as_mut_ptr(), mem::size_of::<MIDIOUTCAPSW>() as u32) };
+        let result = unsafe { midiOutGetDevCapsW(port_number as usize, device_caps.as_mut_ptr(), mem::size_of::<MIDIOUTCAPSW>() as u32) };
         if result == MMSYSERR_BADDEVICEID {
             return Err(PortInfoError::PortNumberOutOfRange)
         } else if result != MMSYSERR_NOERROR {
             return Err(PortInfoError::CannotRetrievePortName)
         }
         let device_caps = unsafe { device_caps.assume_init() };
-        let pname: &[u16] = &device_caps.sz_pname; // FIXME: requires unsafe because of packed alignment ...
+        let pname: &[u16] = unsafe { &device_caps.szPname }; // requires unsafe because of packed alignment ...
         let output = from_wide_ptr(pname.as_ptr(), pname.len()).to_string_lossy().into_owned();
         Ok(output)
     }
@@ -424,7 +414,7 @@ impl MidiOutput {
             None => return Err(ConnectError::new(ConnectErrorKind::InvalidPort, self))
         };
         let mut out_handle: MaybeUninit<HMIDIOUT> = MaybeUninit::uninit();
-        let result = unsafe { midiOutOpen(out_handle.as_mut_ptr(), port_number as UINT, 0, 0, CALLBACK_NULL as u32) };
+        let result = unsafe { midiOutOpen(out_handle.as_mut_ptr(), port_number as UINT, 0, 0, MIDI_OPEN_TYPE::CALLBACK_NULL) };
         if result == MMSYSERR_ALLOCATED {
             return Err(ConnectError::other("could not create Windows MM MIDI output port (MMSYSERR_ALLOCATED)", self));
         } else if result != MMSYSERR_NOERROR {
@@ -454,15 +444,15 @@ impl MidiOutputConnection {
         
             // Create and prepare MIDIHDR structure.
             let mut sysex = MIDIHDR {
-                lp_data: unsafe { mem::transmute(buffer.as_mut_ptr()) },
-                dw_buffer_length: nbytes as u32,
-                dw_bytes_recorded: 0,
-                dw_user: 0,
-                dw_flags: 0,
-                lp_next: ptr::null_mut(),
+                lpData: unsafe { mem::transmute(buffer.as_mut_ptr()) },
+                dwBufferLength: nbytes as u32,
+                dwBytesRecorded: 0,
+                dwUser: 0,
+                dwFlags: 0,
+                lpNext: ptr::null_mut(),
                 reserved: 0,
-                dw_offset: 0,
-                dw_reserved: unsafe { mem::zeroed() },
+                dwOffset: 0,
+                dwReserved: unsafe { mem::zeroed() },
             };
             
             let result = unsafe { midiOutPrepareHeader(self.out_handle, &mut sysex, mem::size_of::<MIDIHDR>() as u32) };
@@ -499,7 +489,7 @@ impl MidiOutputConnection {
             }
             
             // Pack MIDI bytes into double word.
-            let packet: DWORD = 0;
+            let packet: u32 = 0;
             let ptr = &packet as *const u32 as *mut u8;
             for i in 0..nbytes {
                 unsafe { *ptr.offset(i as isize) = message[i] };

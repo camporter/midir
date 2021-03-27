@@ -36,10 +36,10 @@ libc = "0.2.21"
 coremidi = "0.4.0"
 
 [target.'cfg(windows)'.dependencies]
-windows = "0.6.0"
+windows = { git = "https://github.com/microsoft/windows-rs" }
 
 [target.'cfg(windows)'.build-dependencies]
-windows = "0.6.0"
+windows = { git = "https://github.com/microsoft/windows-rs" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
